@@ -23,7 +23,6 @@
 *.dll
 *.so.*
 
-
 # Fortran module files
 *.mod
 *.smod
@@ -39,18 +38,15 @@
 *.out
 *.app
 
+# Bootloader / imagenes de disco (salida de nasm + dd)
+*.bin
+*.img
+*.iso
+
 # Build directories
 build/
 Build/
 build-*/
-
-# CMake generated files
-CMakeFiles/
-CMakeCache.txt
-cmake_install.cmake
-Makefile
-install_manifest.txt
-compile_commands.json
 
 # Temporary files
 *.tmp
@@ -58,12 +54,5 @@ compile_commands.json
 *.bak
 *.swp
 
-# vcpkg
-vcpkg_installed/
-
-# debug information files
-*.dwo
-
-# test output & cache
-Testing/
-.cache/
+# macOS
+.DS_Store
