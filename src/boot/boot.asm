@@ -1,48 +1,133 @@
 ; src/boot/boot.asm
-; Da la bienvenida y detiene la ejecucion mientras se desarrolla la aplicacion
-; (Reloj/Cronometro con Alarma). El BIOS lo carga en la direccion 0x7C00.
+; Bootloader + Clock Mode for the Clock/Stopwatch with Alarm application.
+; Loaded by the BIOS at 0x7C00, 16-bit real mode.
+;
+; Implemented: welcome + confirmation prompt, Clock Mode (BIOS RTC via
+; INT 1Ah), ESC to exit.
+; Pending: Stopwatch Mode, mode switch, stopwatch reset, alarm.
 
 bits 16
 org 0x7C00
 
-start:
-    cli                 ; deshabilita interrupciones mientras configuramos segmentos
+Start:
+    cli
     xor ax, ax
     mov ds, ax
     mov es, ax
     mov ss, ax
     mov sp, 0x7C00
-    sti                 ; reactiva interrupciones
+    sti
 
-    mov si, msg_bienvenida
-    call print_string
+    mov si, WelcomeMsg
+    call PrintString
 
-    ; TODO: aqui se debe cargar/saltar a la aplicacion Reloj/Cronometro
-    ; (leer sectores adicionales del disco con INT 13h y hacer jmp)
+    mov si, ConfirmMsg
+    call PrintString
 
-.hang:
+    xor ah, ah
+    int 0x16                 ; Block until a key is pressed
+
+    call ClearScreen
+
+    mov si, TitleMsg
+    call PrintString
+
+; RTC time via BIOS INT 1Ah/AH=02h returns BCD: CH=hours, CL=minutes, DH=seconds.
+ClockMode:
+    mov ah, 0x02
+    int 0x1a
+    push cx
+    push dx
+
+    mov ah, 0x02              ; Set cursor position
+    mov bh, 0
+    mov dh, 2
+    mov dl, 0
+    int 0x10
+
+    pop dx
+    pop cx
+
+    mov al, ch
+    call PrintBcd
+    mov al, ':'
+    call PrintChar
+    mov al, cl
+    call PrintBcd
+    mov al, ':'
+    call PrintChar
+    mov al, dh
+    call PrintBcd
+
+.CheckKey:
+    mov ah, 0x01
+    int 0x16
+    jz ClockMode
+    xor ah, ah
+    int 0x16
+    cmp al, 0x1b              ; ESC
+    je Finish
+    jmp ClockMode
+
+Finish:
+    call ClearScreen
+    mov si, ExitMsg
+    call PrintString
+.Hang:
     hlt
-    jmp .hang
+    jmp .Hang
 
-; --------------------------------------------------
-; print_string: imprime en pantalla usando teletype BIOS (INT 10h/AH=0x0E)
-; Entrada: SI -> puntero a string terminada en 0
-; --------------------------------------------------
-print_string:
+ClearScreen:
+    push ax
+    mov ax, 0x0003
+    int 0x10
+    pop ax
+    ret
+
+; SI -> null-terminated string
+PrintString:
     pusha
     mov ah, 0x0E
-.loop:
+.Loop:
     lodsb
     cmp al, 0
-    je .done
+    je .Done
     int 0x10
-    jmp .loop
-.done:
+    jmp .Loop
+.Done:
     popa
     ret
 
-msg_bienvenida db 'Bienvenido - Reloj/Cronometro con Alarma', 13, 10, 0
+; AL -> character
+PrintChar:
+    push ax
+    mov ah, 0x0E
+    int 0x10
+    pop ax
+    ret
 
-; Relleno hasta 510 bytes + firma de arranque obligatoria
+; AL -> BCD byte, printed as two ASCII digits
+PrintBcd:
+    push ax
+    push bx
+    mov bl, al
+    shr al, 4
+    add al, '0'
+    mov ah, 0x0E
+    int 0x10
+    mov al, bl
+    and al, 0x0F
+    add al, '0'
+    mov ah, 0x0E
+    int 0x10
+    pop bx
+    pop ax
+    ret
+
+WelcomeMsg db 'Bienvenido - Reloj/Cronometro con Alarma', 13, 10, 0
+ConfirmMsg db 'Presione una tecla para continuar...', 13, 10, 0
+TitleMsg   db 'Modo Reloj (ESC para finalizar)', 13, 10, 0
+ExitMsg    db 13, 10, 'Programa finalizado.', 0
+
 times 510-($-$$) db 0
 dw 0xAA55
