@@ -1,13 +1,17 @@
 ; src/boot/boot.asm
-; Bootloader + Clock Mode for the Clock/Stopwatch with Alarm application.
-; Loaded by the BIOS at 0x7C00, 16-bit real mode.
-;
-; Implemented: welcome + confirmation prompt, Clock Mode (BIOS RTC via
-; INT 1Ah), ESC to exit.
-; Pending: Stopwatch Mode, mode switch, stopwatch reset, alarm.
+; Stage 1 bootloader (Legacy BIOS / MBR) - Tarea 1 CE4303
+; Fits in the mandatory 512-byte boot sector. Welcomes the user, then
+; loads the real application (Stage 2, src/app/app.asm) from the
+; following disk sectors into memory and jumps to it. The 512-byte
+; sector is not big enough to hold Reloj + Cronometro + Alarma, so all
+; of that logic lives in Stage 2, which has no size limit.
 
 bits 16
 org 0x7C00
+
+APP_LOAD_SEG equ 0x0000
+APP_LOAD_OFF equ 0x8000
+APP_SECTORS  equ 16      ; sectors to read for Stage 2 (16*512 = 8KB, plenty)
 
 Start:
     cli
@@ -21,68 +25,26 @@ Start:
     mov si, WelcomeMsg
     call PrintString
 
-    mov si, ConfirmMsg
-    call PrintString
+    ; Read Stage 2 from disk (starts right after this boot sector)
+    ; into ES:BX = 0x0000:0x8000. DL already holds the boot drive,
+    ; set by the BIOS before jumping here.
+    mov bx, APP_LOAD_OFF
+    mov ah, 0x02          ; BIOS: read sectors (INT 13h)
+    mov al, APP_SECTORS
+    mov ch, 0              ; cylinder 0
+    mov cl, 2               ; sector 2 (sector 1 is this boot sector)
+    mov dh, 0               ; head 0
+    int 0x13
+    jc DiskError
 
-    xor ah, ah
-    int 0x16                 ; Block until a key is pressed
+    jmp APP_LOAD_SEG:APP_LOAD_OFF
 
-    call ClearScreen
-
-    mov si, TitleMsg
-    call PrintString
-
-; RTC time via BIOS INT 1Ah/AH=02h returns BCD: CH=hours, CL=minutes, DH=seconds.
-ClockMode:
-    mov ah, 0x02
-    int 0x1a
-    push cx
-    push dx
-
-    mov ah, 0x02              ; Set cursor position
-    mov bh, 0
-    mov dh, 2
-    mov dl, 0
-    int 0x10
-
-    pop dx
-    pop cx
-
-    mov al, ch
-    call PrintBcd
-    mov al, ':'
-    call PrintChar
-    mov al, cl
-    call PrintBcd
-    mov al, ':'
-    call PrintChar
-    mov al, dh
-    call PrintBcd
-
-.CheckKey:
-    mov ah, 0x01
-    int 0x16
-    jz ClockMode
-    xor ah, ah
-    int 0x16
-    cmp al, 0x1b              ; ESC
-    je Finish
-    jmp ClockMode
-
-Finish:
-    call ClearScreen
-    mov si, ExitMsg
+DiskError:
+    mov si, ErrorMsg
     call PrintString
 .Hang:
     hlt
     jmp .Hang
-
-ClearScreen:
-    push ax
-    mov ax, 0x0003
-    int 0x10
-    pop ax
-    ret
 
 ; SI -> null-terminated string
 PrintString:
@@ -98,36 +60,8 @@ PrintString:
     popa
     ret
 
-; AL -> character
-PrintChar:
-    push ax
-    mov ah, 0x0E
-    int 0x10
-    pop ax
-    ret
-
-; AL -> BCD byte, printed as two ASCII digits
-PrintBcd:
-    push ax
-    push bx
-    mov bl, al
-    shr al, 4
-    add al, '0'
-    mov ah, 0x0E
-    int 0x10
-    mov al, bl
-    and al, 0x0F
-    add al, '0'
-    mov ah, 0x0E
-    int 0x10
-    pop bx
-    pop ax
-    ret
-
-WelcomeMsg db 'Bienvenido - Reloj/Cronometro con Alarma', 13, 10, 0
-ConfirmMsg db 'Presione una tecla para continuar...', 13, 10, 0
-TitleMsg   db 'Modo Reloj (ESC para finalizar)', 13, 10, 0
-ExitMsg    db 13, 10, 'Programa finalizado.', 0
+WelcomeMsg db 'Bienvenido - Reloj/Cronometro con Alarma', 13, 10, 'Cargando...', 13, 10, 0
+ErrorMsg   db 'Error al leer el disco.', 13, 10, 0
 
 times 510-($-$$) db 0
 dw 0xAA55
