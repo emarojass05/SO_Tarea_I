@@ -47,14 +47,16 @@ DrawClock:
     jmp KeyCheck
 
 DrawStopwatch:
-    call GetStopwatchTicks    ; AX = elapsed ticks (~18.2 ticks/sec)
-    xor dx, dx
-    mov cx, 18
-    div cx                    ; AX = elapsed seconds (approx)
+    call GetStopwatchTicks32  ; DX:AX = elapsed ticks (32-bit, ~18.2065 ticks/sec)
+    call TicksToSeconds       ; AX = elapsed seconds (see TicksToSeconds for the math)
     xor dx, dx
     mov cx, 60
     div cx                    ; AX = minutes, DX = seconds
-    push dx
+    push dx                   ; save seconds (0-59)
+    mov cx, 100
+    xor dx, dx
+    div cx                    ; DX = minutes mod 100 (display is only 2 digits wide)
+    mov ax, dx
     call SetCursorRow2
     call PrintDec2            ; minutes (AL)
     mov al, ':'
@@ -101,11 +103,12 @@ SwitchMode:
     jmp MainLoop
 
 DoToggle:
-    call ToggleStopwatch
+    call ToggleStopwatch32
     jmp MainLoop
 
 DoReset:
-    mov word [SwElapsed], 0
+    mov word [SwElapsedLo], 0
+    mov word [SwElapsedHi], 0
     mov byte [SwRunning], 0
     jmp MainLoop
 
@@ -124,6 +127,7 @@ Finish:
     call DisableRtcAlarmInterrupt
     call RestoreRtcVector
     call ClearScreen
+    call ShowCursor           ; leave the cursor as we found it (HideCursor hid it in ShowTitle)
     mov si, ExitMsg
     call PrintString
 .Hang:
@@ -174,11 +178,14 @@ AlarmRing:
     call ShowTitle
     jmp MainLoop
 
-; Interactive HH:MM prompt. Reads 4 digit keys (echoed as typed),
-; clamps to valid ranges, stores as BCD (same format INT 1Ah returns)
-; so the RTC's own alarm registers can be programmed directly from it.
+; Interactive HH:MM prompt. Reads 4 digit keys (echoed as typed), stores as
+; BCD (same format INT 1Ah returns) so the RTC's own alarm registers can be
+; programmed directly from it. An out-of-range HH or MM is rejected and the
+; prompt restarts, instead of being silently clamped to the nearest valid
+; value.
 SetAlarmPrompt:
     call ClearScreen
+.Retry:
     mov si, SetAlarmMsg
     call PrintString
 
@@ -190,9 +197,7 @@ SetAlarmPrompt:
     shl al, 4
     or al, bl
     cmp al, 0x23
-    jbe .HourOk
-    mov al, 0x23
-.HourOk:
+    ja .BadInput
     mov [AlarmHour], al
 
     mov al, ':'
@@ -206,9 +211,7 @@ SetAlarmPrompt:
     shl al, 4
     or al, bl
     cmp al, 0x59
-    jbe .MinOk
-    mov al, 0x59
-.MinOk:
+    ja .BadInput
     mov [AlarmMin], al
 
     mov byte [AlarmSet], 1
@@ -221,6 +224,12 @@ SetAlarmPrompt:
     int 0x16
     call ShowTitle
     ret
+
+.BadInput:
+    call ClearScreen
+    mov si, AlarmBadMsg
+    call PrintString
+    jmp .Retry
 
 ; Blocking read of a single '0'-'9' key; echoes it and returns 0-9 in AL.
 ReadDigit:
@@ -350,6 +359,20 @@ HideCursor:
     pop ax
     ret
 
+; Restores the standard 80x25 text-mode cursor shape (start=6, end=7),
+; undoing HideCursor. Called on exit so the terminal isn't left with an
+; invisible cursor after the program halts.
+ShowCursor:
+    push ax
+    push cx
+    mov ah, 0x01
+    mov ch, 0x06
+    mov cl, 0x07
+    int 0x10
+    pop cx
+    pop ax
+    ret
+
 SetCursorRow2:
     push ax
     push bx
@@ -362,37 +385,64 @@ SetCursorRow2:
     pop ax
     ret
 
-; Returns total elapsed stopwatch ticks in AX (running or paused).
-GetStopwatchTicks:
+; Returns total elapsed stopwatch ticks in DX:AX (32-bit; running or paused).
+; Uses the full 32-bit BIOS tick count (CX:DX from INT 1Ah/AH=00h) instead of
+; only its low word, so elapsed time no longer silently wraps/corrupts after
+; ~1 hour (65536 ticks) the way a 16-bit counter would.
+GetStopwatchTicks32:
     push cx
-    push dx
+    push bx
     cmp byte [SwRunning], 0
     je .Paused
     xor ah, ah
-    int 0x1a                  ; DX = low word of ticks since midnight
-    mov ax, dx
-    sub ax, [SwBase]
-    add ax, [SwElapsed]
+    int 0x1a                  ; CX:DX = current absolute 32-bit tick count
+    sub dx, [SwBaseLo]
+    sbb cx, [SwBaseHi]        ; CX:DX = ticks elapsed since (re)start
+    add dx, [SwElapsedLo]
+    adc cx, [SwElapsedHi]     ; + whatever had already accumulated
+    mov ax, dx                ; result convention: DX:AX (DX=high, AX=low)
+    mov dx, cx
     jmp .Done
 .Paused:
-    mov ax, [SwElapsed]
+    mov ax, [SwElapsedLo]
+    mov dx, [SwElapsedHi]
 .Done:
-    pop dx
+    pop bx
     pop cx
     ret
 
+; Converts a 32-bit tick count (DX:AX in, DX=high/AX=low) to elapsed seconds
+; (AX out, 16-bit - sufficient since the display only ever shows MM:SS).
+; ticks/sec is ~18.2065 (PIT rate 1193182Hz / 65536), and 3600/65536 matches
+; that to within ~0.01%, so seconds = ticks * 3600 / 65536. Splitting the
+; 32-bit tick count into its two 16-bit halves lets that division become a
+; free "take the high word" instead of needing a 32x16 multiply:
+;   seconds = ticks_hi*3600 + (ticks_lo*3600) >> 16
+TicksToSeconds:
+    mov [TmpTicksHi], dx
+    mov cx, 3600
+    mul cx                    ; DX:AX = ticks_lo * 3600
+    mov bx, dx                ; bx = seconds contributed by the low half
+    mov ax, [TmpTicksHi]
+    mov cx, 3600
+    mul cx                    ; DX:AX = ticks_hi * 3600 (exact, see comment above)
+    add ax, bx
+    ret
+
 ; Toggles between running and paused, accumulating elapsed time.
-ToggleStopwatch:
+ToggleStopwatch32:
     cmp byte [SwRunning], 0
     je .StartIt
-    call GetStopwatchTicks
-    mov [SwElapsed], ax
+    call GetStopwatchTicks32   ; DX:AX = elapsed
+    mov [SwElapsedLo], ax
+    mov [SwElapsedHi], dx
     mov byte [SwRunning], 0
     ret
 .StartIt:
     xor ah, ah
-    int 0x1a
-    mov [SwBase], dx
+    int 0x1a                   ; CX:DX = current absolute 32-bit tick count
+    mov [SwBaseLo], dx
+    mov [SwBaseHi], cx
     mov byte [SwRunning], 1
     ret
 
@@ -461,8 +511,11 @@ PrintDec2:
 ; --------------------------------------------------------------------
 Mode           db 0          ; 0 = Clock, 1 = Stopwatch
 SwRunning      db 0          ; 0 = paused, 1 = running
-SwBase         dw 0          ; tick count when Stopwatch was last (re)started
-SwElapsed      dw 0          ; accumulated elapsed ticks while paused
+SwBaseLo       dw 0          ; tick count (low word) when Stopwatch was last (re)started
+SwBaseHi       dw 0          ; tick count (high word), see SwBaseLo
+SwElapsedLo    dw 0          ; accumulated elapsed ticks while paused (low word)
+SwElapsedHi    dw 0          ; accumulated elapsed ticks while paused (high word)
+TmpTicksHi     dw 0          ; scratch used by TicksToSeconds
 
 AlarmSet       db 0          ; 0 = no alarm configured, 1 = configured
 AlarmTriggered db 0          ; 0 = not ringing, 1 = ringing
@@ -480,6 +533,7 @@ SwTitle       db 'Modo Cronometro (S: iniciar/pausar, R: reset, A: alarma, M: mo
 AlarmLabel    db 'Alarma: ', 0
 NoAlarmMsg    db '--:--', 0
 SetAlarmMsg   db 'Configurar alarma. Ingrese hora HH: ', 0
+AlarmBadMsg   db 'Hora invalida (HH 00-23, MM 00-59). Intente de nuevo.', 13, 10, 0
 AlarmSetOkMsg db 13, 10, 'Alarma configurada. Presione una tecla...', 13, 10, 0
 AlarmMsg      db '*** ALARMA *** Presione C para cancelar', 13, 10, 0
 ExitMsg       db 13, 10, 'Programa finalizado.', 0
