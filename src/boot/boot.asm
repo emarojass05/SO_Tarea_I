@@ -1,10 +1,6 @@
 ; src/boot/boot.asm
 ; Stage 1 bootloader (Legacy BIOS / MBR) - Tarea 1 CE4303
-; Fits in the mandatory 512-byte boot sector. Welcomes the user, then
-; loads the real application (Stage 2, src/app/app.asm) from the
-; following disk sectors into memory and jumps to it. The 512-byte
-; sector is not big enough to hold Reloj + Cronometro + Alarma, so all
-; of that logic lives in Stage 2, which has no size limit.
+
 
 bits 16
 org 0x7C00
