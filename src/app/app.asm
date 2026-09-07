@@ -10,10 +10,13 @@ AppStart:
     xor ah, ah
     int 0x16                 ; Block until a key is pressed
 
+    call InstallRtcVector     ; hook the RTC's own alarm interrupt (IRQ8/INT 70h)
     call ShowTitle
 
 MainLoop:
-    call CheckAlarm
+    ; AlarmTriggered is set directly by RtcAlarmISR (rtc_alarm.asm), fired
+    ; by the RTC chip's own hardware alarm interrupt - no need to poll
+    ; INT 1Ah here anymore.
     cmp byte [AlarmTriggered], 0
     jne AlarmRing
 
@@ -111,12 +114,15 @@ DoSetAlarm:
     jmp MainLoop
 
 DoCancelAlarm:
+    call DisableRtcAlarmInterrupt
     mov byte [AlarmSet], 0
     mov byte [AlarmTriggered], 0
     call ShowTitle
     jmp MainLoop
 
 Finish:
+    call DisableRtcAlarmInterrupt
+    call RestoreRtcVector
     call ClearScreen
     mov si, ExitMsg
     call PrintString
@@ -127,33 +133,10 @@ Finish:
 ; --------------------------------------------------------------------
 ; Alarm
 ; --------------------------------------------------------------------
-
-; Checks the RTC against the configured alarm time. Sets AlarmTriggered
-; to 1 the instant HH:MM match (only once per configured alarm, since it
-; stays set until cancelled from the ringing loop).
-CheckAlarm:
-    cmp byte [AlarmSet], 0
-    je .Ret
-    cmp byte [AlarmTriggered], 0
-    jne .Ret
-    push ax
-    push cx
-    push dx
-    mov ah, 0x02
-    int 0x1a                  ; CH=hour BCD, CL=minute BCD
-    mov al, ch
-    cmp al, [AlarmHour]
-    jne .NoMatch
-    mov al, cl
-    cmp al, [AlarmMin]
-    jne .NoMatch
-    mov byte [AlarmTriggered], 1
-.NoMatch:
-    pop dx
-    pop cx
-    pop ax
-.Ret:
-    ret
+; The alarm match itself is now detected in hardware by the RTC chip
+; (see rtc_alarm.asm: EnableRtcAlarmInterrupt / RtcAlarmISR), which sets
+; [AlarmTriggered] via a real IRQ8 interrupt instead of being polled
+; here.
 
 ; Full-screen blink + speaker beep, looping until 'C' cancels it.
 AlarmRing:
@@ -185,6 +168,7 @@ AlarmRing:
     call Delay
     jmp .RingLoop
 .CancelAlarm:
+    call DisableRtcAlarmInterrupt
     mov byte [AlarmSet], 0
     mov byte [AlarmTriggered], 0
     call ShowTitle
@@ -192,7 +176,7 @@ AlarmRing:
 
 ; Interactive HH:MM prompt. Reads 4 digit keys (echoed as typed),
 ; clamps to valid ranges, stores as BCD (same format INT 1Ah returns)
-; so CheckAlarm can compare directly against CH/CL.
+; so the RTC's own alarm registers can be programmed directly from it.
 SetAlarmPrompt:
     call ClearScreen
     mov si, SetAlarmMsg
@@ -229,6 +213,7 @@ SetAlarmPrompt:
 
     mov byte [AlarmSet], 1
     mov byte [AlarmTriggered], 0
+    call EnableRtcAlarmInterrupt   ; arm the RTC's own hardware alarm
 
     mov si, AlarmSetOkMsg
     call PrintString
@@ -498,3 +483,9 @@ SetAlarmMsg   db 'Configurar alarma. Ingrese hora HH: ', 0
 AlarmSetOkMsg db 13, 10, 'Alarma configurada. Presione una tecla...', 13, 10, 0
 AlarmMsg      db '*** ALARMA *** Presione C para cancelar', 13, 10, 0
 ExitMsg       db 13, 10, 'Programa finalizado.', 0
+
+; --------------------------------------------------------------------
+; Hardware RTC alarm interrupt module (modular by design, see rubric
+; "Makefiles y modularidad")
+; --------------------------------------------------------------------
+%include "rtc_alarm.asm"
