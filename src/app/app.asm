@@ -1,13 +1,4 @@
 ; src/app/app.asm
-; Stage 2 - Reloj/Cronometro con Alarma application.
-; Loaded by the Stage 1 bootloader (src/boot/boot.asm) at 0x0000:0x8000
-; and executed in 16-bit real mode. DS=ES=SS=0 and SP are inherited from
-; Stage 1, so no extra segment setup is needed here.
-;
-; Implemented: confirmation prompt, Clock Mode (BIOS RTC via INT 1Ah),
-; Stopwatch Mode (start/pause/reset, timed via the INT 1Ah tick counter),
-; a dedicated key to switch modes, ESC to finish the program.
-; Pending: Alarm.
 
 bits 16
 org 0x8000
@@ -22,6 +13,10 @@ AppStart:
     call ShowTitle
 
 MainLoop:
+    call CheckAlarm
+    cmp byte [AlarmTriggered], 0
+    jne AlarmRing
+
     cmp byte [Mode], 0
     je DrawClock
     jmp DrawStopwatch
@@ -77,6 +72,14 @@ KeyCheck:
     je SwitchMode
     cmp al, 'M'
     je SwitchMode
+    cmp al, 'a'
+    je DoSetAlarm
+    cmp al, 'A'
+    je DoSetAlarm
+    cmp al, 'c'
+    je DoCancelAlarm
+    cmp al, 'C'
+    je DoCancelAlarm
     cmp byte [Mode], 0
     je MainLoop               ; S/R only apply in Stopwatch Mode
     cmp al, 's'
@@ -103,6 +106,16 @@ DoReset:
     mov byte [SwRunning], 0
     jmp MainLoop
 
+DoSetAlarm:
+    call SetAlarmPrompt
+    jmp MainLoop
+
+DoCancelAlarm:
+    mov byte [AlarmSet], 0
+    mov byte [AlarmTriggered], 0
+    call ShowTitle
+    jmp MainLoop
+
 Finish:
     call ClearScreen
     mov si, ExitMsg
@@ -110,6 +123,186 @@ Finish:
 .Hang:
     hlt
     jmp .Hang
+
+; --------------------------------------------------------------------
+; Alarm
+; --------------------------------------------------------------------
+
+; Checks the RTC against the configured alarm time. Sets AlarmTriggered
+; to 1 the instant HH:MM match (only once per configured alarm, since it
+; stays set until cancelled from the ringing loop).
+CheckAlarm:
+    cmp byte [AlarmSet], 0
+    je .Ret
+    cmp byte [AlarmTriggered], 0
+    jne .Ret
+    push ax
+    push cx
+    push dx
+    mov ah, 0x02
+    int 0x1a                  ; CH=hour BCD, CL=minute BCD
+    mov al, ch
+    cmp al, [AlarmHour]
+    jne .NoMatch
+    mov al, cl
+    cmp al, [AlarmMin]
+    jne .NoMatch
+    mov byte [AlarmTriggered], 1
+.NoMatch:
+    pop dx
+    pop cx
+    pop ax
+.Ret:
+    ret
+
+; Full-screen blink + speaker beep, looping until 'C' cancels it.
+AlarmRing:
+    call ClearScreen
+.RingLoop:
+    xor byte [FlashState], 1
+    cmp byte [FlashState], 0
+    je .ColorA
+    mov byte [FlashAttr], 0x4F     ; white on red
+    jmp .DoFlash
+.ColorA:
+    mov byte [FlashAttr], 0x1F     ; white on blue
+.DoFlash:
+    call FillScreenAttr
+    mov si, AlarmMsg
+    call PrintString
+    call Beep
+
+    mov ah, 0x01
+    int 0x16
+    jz .NoKeyRing
+    xor ah, ah
+    int 0x16
+    cmp al, 'c'
+    je .CancelAlarm
+    cmp al, 'C'
+    je .CancelAlarm
+.NoKeyRing:
+    call Delay
+    jmp .RingLoop
+.CancelAlarm:
+    mov byte [AlarmSet], 0
+    mov byte [AlarmTriggered], 0
+    call ShowTitle
+    jmp MainLoop
+
+; Interactive HH:MM prompt. Reads 4 digit keys (echoed as typed),
+; clamps to valid ranges, stores as BCD (same format INT 1Ah returns)
+; so CheckAlarm can compare directly against CH/CL.
+SetAlarmPrompt:
+    call ClearScreen
+    mov si, SetAlarmMsg
+    call PrintString
+
+    call ReadDigit
+    mov [InHH], al
+    call ReadDigit
+    mov bl, al
+    mov al, [InHH]
+    shl al, 4
+    or al, bl
+    cmp al, 0x23
+    jbe .HourOk
+    mov al, 0x23
+.HourOk:
+    mov [AlarmHour], al
+
+    mov al, ':'
+    call PrintChar
+
+    call ReadDigit
+    mov [InMM], al
+    call ReadDigit
+    mov bl, al
+    mov al, [InMM]
+    shl al, 4
+    or al, bl
+    cmp al, 0x59
+    jbe .MinOk
+    mov al, 0x59
+.MinOk:
+    mov [AlarmMin], al
+
+    mov byte [AlarmSet], 1
+    mov byte [AlarmTriggered], 0
+
+    mov si, AlarmSetOkMsg
+    call PrintString
+    xor ah, ah
+    int 0x16
+    call ShowTitle
+    ret
+
+; Blocking read of a single '0'-'9' key; echoes it and returns 0-9 in AL.
+ReadDigit:
+    push bx
+.Wait:
+    xor ah, ah
+    int 0x16
+    cmp al, '0'
+    jb .Wait
+    cmp al, '9'
+    ja .Wait
+    mov bl, al
+    call PrintChar
+    mov al, bl
+    sub al, '0'
+    pop bx
+    ret
+
+; Fills the whole screen with the attribute in [FlashAttr] and homes
+; the cursor, used for the blink effect.
+FillScreenAttr:
+    pusha
+    mov ah, 0x06
+    xor al, al
+    mov bh, [FlashAttr]
+    xor cx, cx
+    mov dx, 0x184F
+    int 0x10
+    mov ah, 0x02
+    mov bh, 0
+    xor dx, dx
+    int 0x10
+    popa
+    ret
+
+; Short PC-speaker beep (PIT channel 2, ~1000 Hz) via ports 0x43/0x42/0x61.
+Beep:
+    pusha
+    mov al, 0xB6
+    out 0x43, al
+    mov ax, 1193
+    out 0x42, al
+    mov al, ah
+    out 0x42, al
+    in al, 0x61
+    or al, 0x03
+    out 0x61, al
+    call Delay
+    in al, 0x61
+    and al, 0xFC
+    out 0x61, al
+    popa
+    ret
+
+; Crude busy-wait, used both to hold the beep tone and to pace the blink.
+Delay:
+    push cx
+.D1:
+    mov cx, 0xFFFF
+.D2:
+    dec cx
+    jnz .D2
+    dec word [DelayOuter]
+    jnz .D1
+    mov word [DelayOuter], 3
+    pop cx
+    ret
 
 ; --------------------------------------------------------------------
 ; Helper routines
@@ -122,17 +315,6 @@ ClearScreen:
     pop ax
     ret
 
-    HideCursor:
-    push ax
-    push cx
-    mov ah, 0x01
-    mov ch, 0x20      ; bit 5 en 1 = cursor oculto
-    mov cl, 0x00
-    int 0x10
-    pop cx
-    pop ax
-    ret
-
 ShowTitle:
     call ClearScreen
     call HideCursor
@@ -140,10 +322,47 @@ ShowTitle:
     je .C
     mov si, SwTitle
     call PrintString
+    call PrintAlarmStatus
     ret
 .C:
     mov si, ClockTitle
     call PrintString
+    call PrintAlarmStatus
+    ret
+
+PrintAlarmStatus:
+    push ax
+    mov si, AlarmLabel
+    call PrintString
+    cmp byte [AlarmSet], 0
+    je .None
+    mov al, [AlarmHour]
+    call PrintBcd
+    mov al, ':'
+    call PrintChar
+    mov al, [AlarmMin]
+    call PrintBcd
+    jmp .Done
+.None:
+    mov si, NoAlarmMsg
+    call PrintString
+.Done:
+    mov al, 13
+    call PrintChar
+    mov al, 10
+    call PrintChar
+    pop ax
+    ret
+
+HideCursor:
+    push ax
+    push cx
+    mov ah, 0x01
+    mov ch, 0x20      ; bit 5 set = cursor hidden
+    mov cl, 0x00
+    int 0x10
+    pop cx
+    pop ax
     ret
 
 SetCursorRow2:
@@ -255,12 +474,27 @@ PrintDec2:
 ; --------------------------------------------------------------------
 ; State
 ; --------------------------------------------------------------------
-Mode      db 0          ; 0 = Clock, 1 = Stopwatch
-SwRunning db 0          ; 0 = paused, 1 = running
-SwBase    dw 0          ; tick count when Stopwatch was last (re)started
-SwElapsed dw 0          ; accumulated elapsed ticks while paused
+Mode           db 0          ; 0 = Clock, 1 = Stopwatch
+SwRunning      db 0          ; 0 = paused, 1 = running
+SwBase         dw 0          ; tick count when Stopwatch was last (re)started
+SwElapsed      dw 0          ; accumulated elapsed ticks while paused
 
-ConfirmMsg db 'Presione una tecla para continuar...', 13, 10, 0
-ClockTitle db 'Modo Reloj   (M: cambiar modo, ESC: salir)', 13, 10, 0
-SwTitle    db 'Modo Cronometro   (S: iniciar/pausar, R: reiniciar, M: modo, ESC: salir)', 13, 10, 0
-ExitMsg    db 13, 10, 'Programa finalizado.', 0
+AlarmSet       db 0          ; 0 = no alarm configured, 1 = configured
+AlarmTriggered db 0          ; 0 = not ringing, 1 = ringing
+AlarmHour      db 0          ; BCD, same format as INT 1Ah CH
+AlarmMin       db 0          ; BCD, same format as INT 1Ah CL
+FlashAttr      db 0
+FlashState     db 0
+InHH           db 0
+InMM           db 0
+DelayOuter     dw 3
+
+ConfirmMsg    db 'Presione una tecla para continuar...', 13, 10, 0
+ClockTitle    db 'Modo Reloj  (A: alarma, C: cancelar, M: modo, ESC: salir)', 13, 10, 0
+SwTitle       db 'Modo Cronometro (S: iniciar/pausar, R: reset, A: alarma, M: modo, ESC: salir)', 13, 10, 0
+AlarmLabel    db 'Alarma: ', 0
+NoAlarmMsg    db '--:--', 0
+SetAlarmMsg   db 'Configurar alarma. Ingrese hora HH: ', 0
+AlarmSetOkMsg db 13, 10, 'Alarma configurada. Presione una tecla...', 13, 10, 0
+AlarmMsg      db '*** ALARMA *** Presione C para cancelar', 13, 10, 0
+ExitMsg       db 13, 10, 'Programa finalizado.', 0
