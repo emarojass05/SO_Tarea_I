@@ -4,6 +4,7 @@ QEMU     := qemu-system-x86_64
 BUILD     := build
 BOOT_SRC  := src/boot/boot.asm
 APP_SRC   := src/app/app.asm
+APP_MODS  := src/app/rtc_alarm.asm
 BOOT_BIN  := $(BUILD)/boot.bin
 APP_BIN   := $(BUILD)/app.bin
 IMAGE     := $(BUILD)/disk.img
@@ -18,8 +19,8 @@ $(BUILD):
 $(BOOT_BIN): $(BOOT_SRC) | $(BUILD)
 	$(ASM) -f bin $(BOOT_SRC) -o $(BOOT_BIN)
 
-$(APP_BIN): $(APP_SRC) | $(BUILD)
-	$(ASM) -f bin $(APP_SRC) -o $(APP_BIN)
+$(APP_BIN): $(APP_SRC) $(APP_MODS) | $(BUILD)
+	$(ASM) -f bin -I $(dir $(APP_SRC)) $(APP_SRC) -o $(APP_BIN)
 
 $(IMAGE): $(BOOT_BIN) $(APP_BIN)
 	dd if=/dev/zero of=$(IMAGE) bs=512 count=2880 status=none
