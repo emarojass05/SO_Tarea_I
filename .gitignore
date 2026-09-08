@@ -42,6 +42,7 @@
 *.bin
 *.img
 *.iso
+*.efi
 
 # Build directories
 build/
