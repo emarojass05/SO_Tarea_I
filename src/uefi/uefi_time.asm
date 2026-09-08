@@ -22,6 +22,18 @@ GetTimeNow:
     mov  rax, [gRT]
     call qword [rax + RT_GetTime]
     EFI_EPILOGUE
+
+    ; El RTC de este equipo guarda la hora en UTC, no en hora local.
+    ; Costa Rica es siempre UTC-6 (no tiene horario de verano), asi
+    ; que se ajusta aqui una sola vez -sobre TimeBuf- para que el
+    ; reloj, el cronometro y la comparacion de la alarma usen todos
+    ; la hora local correcta sin duplicar el ajuste en cada modulo.
+    movzx eax, byte [TimeBuf + TIME_Hour]
+    sub   eax, 6
+    jns   .noWrap
+    add   eax, 24
+.noWrap:
+    mov   [TimeBuf + TIME_Hour], al
     ret
 
 section .data
