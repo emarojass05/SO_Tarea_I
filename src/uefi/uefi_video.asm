@@ -56,8 +56,17 @@ PrintDec2:
     pop  rbx
     ret
 
+; Antes de limpiar, siempre repone el color por defecto: FillScreenAttr
+; (usada por AlarmRing para el parpadeo rojo/azul) deja el atributo de
+; ConOut puesto ahi hasta que algo lo cambie explicitamente -a diferencia
+; de la version BIOS, UEFI no lo resetea solo- asi que sin esto la
+; pantalla se quedaba pintada de rojo/azul despues de cancelar la alarma.
 ClearScreen:
     EFI_PROLOGUE
+    mov  rax, [gConOut]
+    mov  rcx, rax
+    mov  rdx, EFI_LIGHTGRAY
+    call qword [rax + TXTOUT_SetAttribute]
     mov  rax, [gConOut]
     mov  rcx, rax
     call qword [rax + TXTOUT_ClearScreen]

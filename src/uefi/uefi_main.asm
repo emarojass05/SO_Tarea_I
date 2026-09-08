@@ -89,7 +89,7 @@ KeyCheck:
 
 SwitchMode:
     xor  byte [Mode], 1
-    mov  dword [LastSecond], -1
+    mov  byte [LastSecond], -1
     mov  dword [LastSwSecs], -1
     call ShowTitle
     jmp  MainLoop
